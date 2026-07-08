@@ -1,0 +1,37 @@
+version: 2
+project_name: hydra
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: hydra
+    main: ./cmd/hydra
+    binary: hydra
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: default
+    # Predictable names so install.sh can fetch hydra_<os>_<arch>.tar.gz.
+    name_template: "hydra_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+
+checksum:
+  name_template: "checksums.txt"
+
+release:
+  github:
+    owner: ChaudharyRaman
+    name: hydra
+  draft: false
+
+changelog:
+  use: github

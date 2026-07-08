@@ -4,6 +4,28 @@
 
 A terminal-first mission control for people who run 10–15 Claude Code sessions at once and have no idea which one needs them.
 
+## Install
+
+**One command** (Linux/macOS) — downloads the binary, wires Claude Code hooks, sets PATH:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ChaudharyRaman/hydra/master/install.sh | sh
+```
+
+**Go developers:**
+
+```sh
+go install github.com/ChaudharyRaman/hydra/cmd/hydra@latest && hydra install
+```
+
+**From source:**
+
+```sh
+git clone https://github.com/ChaudharyRaman/hydra && cd hydra && make install
+```
+
+Then open a new terminal and run `hydra`. Windows is supported via WSL (native ConPTY build is untested). The `curl` and `go install` methods require the repository and a published release to be publicly accessible.
+
 ## The problem
 
 You run Claude Code in 10–15 terminals simultaneously. Right now you:
