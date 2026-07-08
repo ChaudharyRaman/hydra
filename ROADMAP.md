@@ -19,6 +19,11 @@ items are only moved to "Done" once verified, not once written.
 - **Head types:** Claude, plain shell, or a custom command (e.g. `ssh host`)
   chosen with Tab in the new-head prompt. Rename with `R`.
 - **Bracketed paste** forwarded to the focused head.
+- **Text selection & copy:** drag the mouse over the terminal pane to select;
+  on release the text is copied to the system clipboard via OSC 52 (iTerm2,
+  SSH-friendly) and the native tool (xclip/pbcopy/clip). Verified end-to-end.
+- **Scrollback search:** `/` searches a head's whole history (reverse order),
+  jumps to matches, `n`/`N` cycle, matches highlighted.
 
 ## Next up (highest value first)
 
@@ -38,13 +43,12 @@ ConPTY; shell selection switches to PowerShell on Windows). But it has only
 been *run* on Linux. Needs a real test pass on macOS/iTerm2 and Windows, plus
 a launchd plist to mirror the Linux systemd unit.
 
-### 3. Copy mode & clipboard
-Visual selection in scrollback + copy to the system clipboard (OSC 52 through
-the outer terminal). Today the mouse wheel is captured for scrolling, so the
-outer terminal's native selection is blocked over the hydra window.
-
-### 4. Scrollback search
-`/` in scroll mode to find and jump to matches within a head's history.
+### 3. Selection polish
+Selection + copy works; still nice-to-have: word/line double/triple-click,
+select across scrollback while auto-scrolling, and keyboard-driven selection
+for the mouse-averse. Note: because hydra captures the mouse, the outer
+terminal's *native* selection is bypassed — in iTerm2 hold ⌥ (Option), in
+GNOME Terminal hold Shift, to select natively instead.
 
 ## Known limitations (by design or not yet addressed)
 

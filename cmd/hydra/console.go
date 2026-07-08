@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"hydra/internal/clipboard"
 	"hydra/internal/core"
 	"hydra/internal/terminal"
 )
@@ -79,6 +80,18 @@ type consoleModel struct {
 	scrollOff int  // lines scrolled up into the focused head's history (0 = live)
 	helpOpen  bool // F1 help overlay
 
+	// Mouse text selection over the terminal pane (content-row/col coords).
+	selActive    bool
+	selAX, selAY int // anchor
+	selBX, selBY int // current end
+
+	// Scrollback search.
+	searching   bool   // typing a query
+	searchQuery string // applied query (highlighted)
+	matches     []int  // buffer line indices containing the query
+	matchIdx    int
+	searchTotal int // buffer length when the search ran (for jump mapping)
+
 	flash      string
 	flashUntil time.Time
 	width      int
@@ -129,16 +142,235 @@ func (m *consoleModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeFocused()
 		return m, consoleTickCmd()
 	case tea.MouseMsg:
-		switch msg.Button {
-		case tea.MouseButtonWheelUp:
-			m.scrollBy(3)
-		case tea.MouseButtonWheelDown:
-			m.scrollBy(-3)
-		}
+		m.onMouse(msg)
 	case tea.KeyMsg:
 		return m.onKey(msg)
 	}
 	return m, nil
+}
+
+// onMouse handles wheel scrolling and click-drag text selection inside the
+// terminal pane (hydra captures the mouse, so selection is done in-app).
+func (m *consoleModel) onMouse(msg tea.MouseMsg) {
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		m.scrollBy(3)
+		return
+	case tea.MouseButtonWheelDown:
+		m.scrollBy(-3)
+		return
+	case tea.MouseButtonLeft:
+	default:
+		return
+	}
+
+	col := msg.X - (sidebarW + 1) // right box: left border + 1
+	row := msg.Y - 3              // title + top border + header
+	switch msg.Action {
+	case tea.MouseActionPress:
+		if col >= 0 && col < m.termCols() && row >= 0 && row < m.termRows() {
+			m.selActive = true
+			m.selAX, m.selAY, m.selBX, m.selBY = col, row, col, row
+		} else {
+			m.selActive = false
+		}
+	case tea.MouseActionMotion:
+		if m.selActive {
+			m.selBX, m.selBY = clamp(col, 0, m.termCols()-1), clamp(row, 0, m.termRows()-1)
+		}
+	case tea.MouseActionRelease:
+		if m.selActive {
+			m.copySelection()
+		}
+	}
+}
+
+func clamp(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+// copySelection extracts the selected text from the visible lines and copies
+// it to the system clipboard.
+func (m *consoleModel) copySelection() {
+	lines := m.visibleTextLines()
+	ax, ay, bx, by := m.selAX, m.selAY, m.selBX, m.selBY
+	if ay > by || (ay == by && ax > bx) {
+		ax, ay, bx, by = bx, by, ax, ay
+	}
+	var parts []string
+	for y := ay; y <= by && y < len(lines); y++ {
+		line := lines[y]
+		from, to := 0, len([]rune(line))
+		if y == ay {
+			from = ax
+		}
+		if y == by {
+			to = bx + 1
+		}
+		parts = append(parts, runeSlice(line, from, to))
+	}
+	text := strings.TrimRight(strings.Join(parts, "\n"), " \n")
+	if text != "" {
+		clipboard.Copy(text)
+		m.setFlash(fmt.Sprintf("copied %d chars to clipboard", len(text)))
+	}
+}
+
+func runeSlice(s string, from, to int) string {
+	r := []rune(s)
+	if from < 0 {
+		from = 0
+	}
+	if to > len(r) {
+		to = len(r)
+	}
+	if from >= to {
+		return ""
+	}
+	return string(r[from:to])
+}
+
+// visibleLines returns the styled content rows currently shown for the
+// selected head (no header, no cursor overlay) — the single source both the
+// renderer and the selection/copy path read from, so they never diverge.
+func (m *consoleModel) visibleLines() []string {
+	it := m.cur()
+	if it == nil || it.head == nil {
+		return nil
+	}
+	if m.scrollOff > 0 {
+		return it.head.ViewLines(m.scrollOff, m.termRows())
+	}
+	return strings.Split(it.head.Render(), "\n")
+}
+
+func (m *consoleModel) visibleTextLines() []string {
+	styled := m.visibleLines()
+	out := make([]string, len(styled))
+	for i, l := range styled {
+		out[i] = ansi.Strip(l)
+	}
+	return out
+}
+
+// runSearch finds every buffer line containing the query and jumps to the
+// most recent (bottom-most) match — reverse-search order.
+func (m *consoleModel) runSearch() {
+	m.matches, m.matchIdx = nil, 0
+	it := m.cur()
+	if it == nil || it.head == nil || strings.TrimSpace(m.searchQuery) == "" {
+		return
+	}
+	buf := it.head.BufferLines()
+	m.searchTotal = len(buf)
+	q := strings.ToLower(m.searchQuery)
+	for i, line := range buf {
+		if strings.Contains(strings.ToLower(line), q) {
+			m.matches = append(m.matches, i)
+		}
+	}
+	if len(m.matches) == 0 {
+		m.setFlash("no match for '" + m.searchQuery + "'")
+		return
+	}
+	m.matchIdx = len(m.matches) - 1
+	m.jumpToMatch()
+	m.setFlash(fmt.Sprintf("match %d/%d — n older · N newer", m.matchIdx+1, len(m.matches)))
+}
+
+func (m *consoleModel) stepMatch(dir int) {
+	if len(m.matches) == 0 {
+		return
+	}
+	m.matchIdx = clamp(m.matchIdx+dir, 0, len(m.matches)-1)
+	m.jumpToMatch()
+	m.setFlash(fmt.Sprintf("match %d/%d", m.matchIdx+1, len(m.matches)))
+}
+
+// jumpToMatch scrolls so the current match sits near the middle of the pane.
+func (m *consoleModel) jumpToMatch() {
+	it := m.cur()
+	if it == nil || it.head == nil || len(m.matches) == 0 {
+		return
+	}
+	line := m.matches[m.matchIdx]
+	off := m.searchTotal - line - m.termRows()/2
+	m.scrollOff = clamp(off, 0, it.head.ScrollbackLen())
+}
+
+// decorate applies search highlight, selection highlight, and the cursor to
+// one styled content row (in that order).
+func (m *consoleModel) decorate(line string, row, cursorCol int) string {
+	if m.searchQuery != "" {
+		line = highlightAll(line, m.searchQuery)
+	}
+	if m.selActive {
+		if from, to, ok := m.selRangeForRow(row); ok {
+			line = highlightRange(line, from, to)
+		}
+	}
+	if cursorCol >= 0 {
+		line = cursorOverlay(line, cursorCol)
+	}
+	return line
+}
+
+func (m *consoleModel) selRangeForRow(row int) (from, to int, ok bool) {
+	ax, ay, bx, by := m.selAX, m.selAY, m.selBX, m.selBY
+	if ay > by || (ay == by && ax > bx) {
+		ax, ay, bx, by = bx, by, ax, ay
+	}
+	if row < ay || row > by {
+		return 0, 0, false
+	}
+	from, to = 0, m.termCols()
+	if row == ay {
+		from = ax
+	}
+	if row == by {
+		to = bx + 1
+	}
+	return from, to, true
+}
+
+// highlightRange reverse-videos visible columns [from,to) of a styled line.
+func highlightRange(line string, from, to int) string {
+	w := lipgloss.Width(line)
+	from, to = clamp(from, 0, w), clamp(to, 0, w)
+	if from >= to {
+		return line
+	}
+	mid := ansi.Strip(ansi.Cut(line, from, to))
+	return ansi.Cut(line, 0, from) + "\x1b[7m" + mid + "\x1b[27m" + ansi.Cut(line, to, w)
+}
+
+// highlightAll reverse-videos every occurrence of query in a styled line.
+func highlightAll(line, query string) string {
+	plain := strings.ToLower(ansi.Strip(line))
+	q := strings.ToLower(query)
+	if q == "" {
+		return line
+	}
+	var ranges [][2]int
+	for i := 0; ; {
+		j := strings.Index(plain[i:], q)
+		if j < 0 {
+			break
+		}
+		start := len([]rune(plain[:i+j]))
+		ranges = append(ranges, [2]int{start, start + len([]rune(q))})
+		i += j + len(q)
+	}
+	for k := len(ranges) - 1; k >= 0; k-- { // right-to-left keeps columns valid
+		line = highlightRange(line, ranges[k][0], ranges[k][1])
+	}
+	return line
 }
 
 // scrollBy moves the focused head's view into or out of its scrollback.
@@ -147,6 +379,7 @@ func (m *consoleModel) scrollBy(n int) {
 	if it == nil || it.head == nil {
 		return
 	}
+	m.selActive = false // row coords go stale once the view scrolls
 	m.scrollOff += n
 	if m.scrollOff < 0 {
 		m.scrollOff = 0
@@ -170,6 +403,27 @@ func (m *consoleModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.helpOpen { // any other key dismisses help
 		if msg.Type == tea.KeyEsc || msg.String() == "q" {
 			m.helpOpen = false
+		}
+		return m, nil
+	}
+
+	if m.searching {
+		switch msg.String() {
+		case "enter":
+			m.runSearch()
+			m.searching = false
+		case "esc":
+			m.searching, m.searchQuery, m.matches = false, "", nil
+		case "backspace":
+			if len(m.searchQuery) > 0 {
+				m.searchQuery = m.searchQuery[:len(m.searchQuery)-1]
+			}
+		default:
+			if msg.Type == tea.KeyRunes {
+				m.searchQuery += string(msg.Runes)
+			} else if msg.Type == tea.KeySpace {
+				m.searchQuery += " "
+			}
 		}
 		return m, nil
 	}
@@ -242,17 +496,27 @@ func (m *consoleModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "up", "k":
 		if m.selected > 0 {
 			m.selected--
-			m.scrollOff = 0
+			m.resetView()
 		}
 	case "down", "j":
 		if m.selected < len(m.items)-1 {
 			m.selected++
-			m.scrollOff = 0
+			m.resetView()
 		}
 	case "pgup":
 		m.scrollBy(m.termRows() / 2)
 	case "pgdown":
 		m.scrollBy(-m.termRows() / 2)
+	case "/":
+		if it := m.cur(); it != nil && it.head != nil {
+			m.searching, m.searchQuery = true, ""
+		}
+	case "n":
+		m.stepMatch(-1) // older / up (reverse search direction)
+	case "N":
+		m.stepMatch(1) // newer / down
+	case "esc":
+		m.selActive, m.searchQuery, m.matches = false, "", nil
 	case "enter":
 		if it := m.cur(); it != nil && it.live {
 			m.focusTerm = true
@@ -280,6 +544,13 @@ func (m *consoleModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.refresh()
 	}
 	return m, nil
+}
+
+// resetView clears per-head view state when the selection changes.
+func (m *consoleModel) resetView() {
+	m.scrollOff = 0
+	m.selActive = false
+	m.searchQuery, m.matches = "", nil
 }
 
 func (m *consoleModel) cur() *item {
@@ -509,21 +780,24 @@ func (m *consoleModel) viewTerminal() string {
 	default:
 		it := m.cur()
 		header := titleStyle.Render("["+strings.ToLower(it.name)+" ") + dimText.Render(it.dir+"]")
-		if m.scrollOff > 0 {
-			header += "  " + flashStyle.Render(fmt.Sprintf("⟲ SCROLLBACK −%d (type or wheel-down to return)", m.scrollOff))
+		switch {
+		case m.searchQuery != "" && len(m.matches) > 0:
+			header += "  " + flashStyle.Render(fmt.Sprintf("/%s  %d/%d", m.searchQuery, m.matchIdx+1, len(m.matches)))
+		case m.scrollOff > 0:
+			header += "  " + flashStyle.Render(fmt.Sprintf("⟲ SCROLLBACK −%d", m.scrollOff))
 		}
 		lines = append(lines, header)
-		if m.scrollOff > 0 {
-			lines = append(lines, it.head.ViewLines(m.scrollOff, m.termRows())...)
-		} else {
-			emLines := strings.Split(it.head.Render(), "\n")
-			if m.focusTerm { // draw the terminal cursor as a reverse-video block
-				cx, cy := it.head.CursorPos()
-				if cy >= 0 && cy < len(emLines) {
-					emLines[cy] = cursorOverlay(emLines[cy], cx)
-				}
+
+		cx, cy := -1, -1
+		if m.focusTerm && m.scrollOff == 0 { // cursor only meaningful on the live screen
+			cx, cy = it.head.CursorPos()
+		}
+		for r, line := range m.visibleLines() {
+			col := -1
+			if r == cy {
+				col = cx
 			}
-			lines = append(lines, emLines...)
+			lines = append(lines, m.decorate(line, r, col))
 		}
 	}
 	return boxify(lines, innerW, rows, borderColor)
@@ -552,6 +826,9 @@ func boxify(lines []string, innerW, rows int, border lipgloss.Color) string {
 }
 
 func (m *consoleModel) viewFooter() string {
+	if m.searching {
+		return promptStyle.Render(" /") + m.searchQuery + "▏" + dimText.Render("   Enter search · Esc cancel")
+	}
 	if m.flash != "" && time.Now().Before(m.flashUntil) {
 		return flashStyle.Render(" » " + m.flash)
 	}
@@ -569,7 +846,7 @@ func (m *consoleModel) viewFooter() string {
 	case m.focusTerm:
 		keys = "Ctrl+Q Detach · wheel/Shift+PgUp Scroll · F1 Help · (keys → terminal)"
 	default:
-		keys = "↑/↓ Select · Enter Focus · Ctrl+N New · R Rename · Ctrl+X Close · F1 Help · q Quit"
+		keys = "↑/↓ Select · Enter Focus · / Search · drag=copy · Ctrl+N New · F1 Help · q Quit"
 	}
 	gap := m.width - lipgloss.Width(info) - lipgloss.Width(keys) - 2
 	if gap < 1 {
@@ -590,13 +867,14 @@ func helpLines() []string {
 		"  Ctrl+N         new head (Tab in prompt: Claude / shell / custom)",
 		"  R              rename the selected head",
 		"  Ctrl+X         close the selected head",
-		"  PgUp/PgDn      scroll selected head's output",
+		"  PgUp/PgDn      scroll · drag mouse to select+copy",
+		"  /              search history · n older · N newer · Esc clear",
 		"  q / Ctrl+C     quit hydra",
 		"",
 		dim("Focused terminal"),
 		"  Ctrl+Q         detach back to the sidebar",
 		"  Wheel / Shift+PgUp/PgDn   scroll history",
-		"  Ctrl+←/→       move by word     Ctrl+Backspace  delete word",
+		"  Ctrl+←/→ word move · Ctrl+Backspace word delete · Ctrl+R shell search",
 		"  all other keys go straight to Claude / the shell",
 		"",
 		dim("Anywhere:  F1 help · F5 refresh"),

@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 	"github.com/creack/pty"
 )
@@ -165,6 +166,25 @@ func (s *Session) ViewLines(offset, rows int) []string {
 		} else if i-sbLen < len(screen) {
 			out = append(out, screen[i-sbLen])
 		}
+	}
+	return out
+}
+
+// BufferLines returns the whole history (scrollback + live screen) as plain
+// text, one string per line — for search. Oldest line first; index N-1 is
+// the bottom of the live screen.
+func (s *Session) BufferLines() []string {
+	sbLen := s.em.ScrollbackLen()
+	s.mu.Lock()
+	cols := s.cols
+	s.mu.Unlock()
+
+	out := make([]string, 0, sbLen+len(strings.Split(s.em.Render(), "\n")))
+	for i := 0; i < sbLen; i++ {
+		out = append(out, ansi.Strip(s.scrollbackLine(i, cols)))
+	}
+	for _, l := range strings.Split(s.em.Render(), "\n") {
+		out = append(out, ansi.Strip(l))
 	}
 	return out
 }
