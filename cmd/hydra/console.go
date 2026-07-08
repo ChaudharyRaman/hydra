@@ -117,7 +117,9 @@ func (m *consoleModel) setFlash(s string) {
 func (m *consoleModel) Init() tea.Cmd { return consoleTickCmd() }
 
 func consoleTickCmd() tea.Cmd {
-	return tea.Tick(80*time.Millisecond, func(t time.Time) tea.Msg { return consoleTick(t) })
+	// Cheap now that Render() reads a cached snapshot, so poll often for
+	// smooth motion; Bubble Tea only writes cells that actually changed.
+	return tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg { return consoleTick(t) })
 }
 
 // ---- sizing ----

@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/x/ansi"
@@ -20,7 +21,13 @@ import (
 	"github.com/creack/pty"
 )
 
-// Session is one live head.
+// renderInterval is how often a head refreshes its cached screen snapshot.
+const renderInterval = 33 * time.Millisecond
+
+// Session is one live head. Rendering is decoupled from the UI thread: the
+// emulator (heavily write-locked by streaming child output) is only touched
+// by the head's own goroutines, which publish a cached snapshot the UI reads
+// lock-free. Input is queued so a busy child can never block the caller.
 type Session struct {
 	ID      string
 	Name    string
@@ -36,6 +43,17 @@ type Session struct {
 	rows  int
 	alive bool
 	exit  string // set once the process exits
+
+	// Cached render snapshot, read by the UI thread without touching the
+	// emulator lock.
+	cacheMu    sync.RWMutex
+	cache      string
+	curX, curY int
+
+	dirty   atomic.Bool
+	inputCh chan []byte
+	done    chan struct{}
+	closeCh sync.Once
 }
 
 func newID() string {
@@ -97,10 +115,15 @@ func New(name, dir, autorun string, cols, rows int) (*Session, error) {
 		ID: id, Name: name, Dir: dir, Started: time.Now(),
 		cmd: cmd, ptmx: ptmx, em: vt.NewSafeEmulator(cols, rows),
 		cols: cols, rows: rows, alive: true,
+		inputCh: make(chan []byte, 4096),
+		done:    make(chan struct{}),
 	}
+	s.dirty.Store(true)
 
-	go io.Copy(s.em, ptmx) // child output -> emulator screen
+	go s.readLoop()        // child output -> emulator screen (+ mark dirty)
 	go io.Copy(ptmx, s.em) // emulator responses -> child (cursor reports, etc.)
+	go s.writeLoop()       // queued input -> child (never blocks the caller)
+	go s.renderLoop()      // throttled emulator snapshot -> cache
 	go s.wait()
 
 	if autorun != "" {
@@ -110,6 +133,61 @@ func New(name, dir, autorun string, cols, rows int) (*Session, error) {
 		}()
 	}
 	return s, nil
+}
+
+// readLoop copies child output into the emulator and flags the screen dirty.
+func (s *Session) readLoop() {
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := s.ptmx.Read(buf)
+		if n > 0 {
+			s.em.Write(buf[:n])
+			s.dirty.Store(true)
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// writeLoop drains queued keystrokes to the PTY. Isolating the write here
+// means a child that has stopped reading stdin blocks only this goroutine,
+// never the UI thread.
+func (s *Session) writeLoop() {
+	for {
+		select {
+		case b := <-s.inputCh:
+			s.ptmx.Write(b)
+		case <-s.done:
+			return
+		}
+	}
+}
+
+// renderLoop republishes the cached screen snapshot at a steady rate, but
+// only when the emulator has actually changed.
+func (s *Session) renderLoop() {
+	t := time.NewTicker(renderInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+			if s.dirty.Swap(false) {
+				s.updateCache()
+			}
+		case <-s.done:
+			s.updateCache() // final frame
+			return
+		}
+	}
+}
+
+func (s *Session) updateCache() {
+	r := s.em.Render()
+	p := s.em.CursorPosition()
+	s.cacheMu.Lock()
+	s.cache, s.curX, s.curY = r, p.X, p.Y
+	s.cacheMu.Unlock()
 }
 
 func (s *Session) wait() {
@@ -122,15 +200,23 @@ func (s *Session) wait() {
 		s.exit = "exited"
 	}
 	s.mu.Unlock()
+	s.closeCh.Do(func() { close(s.done) })
 }
 
-// Render returns the head's current screen, styled with ANSI.
-func (s *Session) Render() string { return s.em.Render() }
+// Render returns the head's cached screen snapshot (styled with ANSI). This
+// is lock-free with respect to the emulator, so heavy child output never
+// stalls the UI thread that calls it.
+func (s *Session) Render() string {
+	s.cacheMu.RLock()
+	defer s.cacheMu.RUnlock()
+	return s.cache
+}
 
-// CursorPos returns the emulator's cursor cell (column, row).
+// CursorPos returns the cached cursor cell (column, row).
 func (s *Session) CursorPos() (int, int) {
-	p := s.em.CursorPosition()
-	return p.X, p.Y
+	s.cacheMu.RLock()
+	defer s.cacheMu.RUnlock()
+	return s.curX, s.curY
 }
 
 // ScrollbackLen is the number of lines that have scrolled off the top and
@@ -204,13 +290,17 @@ func (s *Session) scrollbackLine(y, cols int) string {
 	return b.String()
 }
 
-// Send writes raw bytes to the head's input (keystrokes).
+// Send queues raw bytes to the head's input (keystrokes). Non-blocking: it
+// returns immediately even if the child is momentarily not reading stdin.
 func (s *Session) Send(b []byte) {
-	s.mu.Lock()
-	alive := s.alive
-	s.mu.Unlock()
-	if alive {
-		s.ptmx.Write(b)
+	if !s.Alive() {
+		return
+	}
+	cp := make([]byte, len(b))
+	copy(cp, b)
+	select {
+	case s.inputCh <- cp:
+	case <-s.done:
 	}
 }
 
@@ -262,6 +352,7 @@ func (s *Session) Close() {
 		s.cmd.Process.Kill()
 	}
 	s.ptmx.Close()
+	s.closeCh.Do(func() { close(s.done) })
 }
 
 // Manager holds every live head hydra has spawned, in creation order.
