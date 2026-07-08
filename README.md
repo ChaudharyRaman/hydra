@@ -26,6 +26,20 @@ git clone https://github.com/ChaudharyRaman/hydra && cd hydra && make install
 
 Then open a new terminal and run `hydra`. Windows is supported via WSL (native ConPTY build is untested). The `curl` and `go install` methods require the repository and a published release to be publicly accessible.
 
+**Requires [Claude Code](https://claude.com/claude-code) installed and on your `PATH`** — each head runs `claude`.
+
+### macOS notes
+
+Universal binaries are published for both Apple Silicon (`arm64`) and Intel (`amd64`), and the installer picks the right one automatically. Clipboard copy uses `pbcopy` and notifications use `osascript`, both built in.
+
+The binary is not code-signed or notarized. Installing via `curl | sh` avoids the quarantine flag, so it runs without a Gatekeeper prompt. If you obtain the binary another way (e.g. a browser download) and macOS blocks it, clear the quarantine attribute:
+
+```sh
+xattr -dr com.apple.quarantine ~/.hydra/bin/hydra
+```
+
+macOS support is expected but not yet verified end-to-end — the published binary is a valid Mach-O executable, but hydra has so far only been run on Linux.
+
 ## The problem
 
 You run Claude Code in 10–15 terminals simultaneously. Right now you:
