@@ -1,0 +1,15 @@
+# Build output
+/hydra
+/bin/
+*.exe
+
+# Go
+*.test
+*.out
+vendor/
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

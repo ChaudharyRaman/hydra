@@ -1,0 +1,12 @@
+[Unit]
+Description=Hydra — Claude Code mission control daemon (web dashboard + task queue)
+After=network.target
+
+[Service]
+ExecStart=%h/.hydra/bin/hydra serve -addr 127.0.0.1:7717
+Environment=PATH=%h/.local/bin:%h/.hydra/bin:/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
