@@ -22,6 +22,8 @@ Usage:
                     queue workers (-addr 0.0.0.0:7717 for phone, -jobs N)
   hydra run "..."   queue a headless task on the daemon (-d dir, -m mode)
   hydra tasks       list queued/running/finished headless tasks
+  hydra update      update hydra to the latest release
+  hydra version     print the installed version
   hydra hook        read a Claude Code hook event from stdin, log it, notify if needed
                     (wired into ~/.claude/settings.json by 'hydra install')
   hydra status      show every known session and its state
@@ -49,6 +51,10 @@ func main() {
 		runRun(os.Args[2:])
 	case "tasks":
 		runTasks()
+	case "update":
+		runUpdate()
+	case "version", "--version", "-v":
+		fmt.Println("hydra", version)
 	case "hook":
 		runHook() // never returns non-zero: must not disturb Claude sessions
 	case "status":

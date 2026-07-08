@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"hydra/internal/clipboard"
 	"hydra/internal/core"
 	"hydra/internal/terminal"
+	"hydra/internal/update"
 )
 
 // ansiTrunc truncates to a visible width while preserving ANSI styling.
@@ -93,9 +95,26 @@ type consoleModel struct {
 
 	flash      string
 	flashUntil time.Time
+	newVersion string // set if a newer release is available
 	width      int
 	height     int
 	ticks      int
+}
+
+type updateAvailableMsg string
+
+// checkUpdateCmd checks (throttled to once/day) whether a newer release
+// exists, off the UI thread so startup stays instant.
+func checkUpdateCmd() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer cancel()
+		latest, err := update.LatestCachedOrFetch(ctx)
+		if err != nil || !update.IsNewer(version, latest) {
+			return nil
+		}
+		return updateAvailableMsg(latest)
+	}
 }
 
 func runConsole() {
@@ -113,7 +132,7 @@ func (m *consoleModel) setFlash(s string) {
 	m.flashUntil = time.Now().Add(4 * time.Second)
 }
 
-func (m *consoleModel) Init() tea.Cmd { return consoleTickCmd() }
+func (m *consoleModel) Init() tea.Cmd { return tea.Batch(consoleTickCmd(), checkUpdateCmd()) }
 
 func consoleTickCmd() tea.Cmd {
 	// Cheap now that Render() reads a cached snapshot, so poll often for
@@ -142,6 +161,8 @@ func (m *consoleModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.resizeFocused()
 		return m, consoleTickCmd()
+	case updateAvailableMsg:
+		m.newVersion = string(msg)
 	case tea.MouseMsg:
 		m.onMouse(msg)
 	case tea.KeyMsg:
@@ -709,6 +730,9 @@ func (m *consoleModel) viewTitle() string {
 	right := strings.Join(badges, dimText.Render(" · "))
 	if right != "" {
 		right += dimText.Render("  ")
+	}
+	if m.newVersion != "" {
+		right += lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Render("⬆ "+m.newVersion+" — hydra update") + dimText.Render("  ")
 	}
 	right += dimText.Render(time.Now().Format("15:04:05")) + " "
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)

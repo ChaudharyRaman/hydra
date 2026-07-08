@@ -26,6 +26,8 @@ git clone https://github.com/ChaudharyRaman/hydra && cd hydra && make install
 
 Then open a new terminal and run `hydra`. Windows is supported via WSL (native ConPTY build is untested). The `curl` and `go install` methods require the repository and a published release to be publicly accessible.
 
+**Updating:** run `hydra update` to self-update to the latest release (the console also shows an unobtrusive "new version available" nudge, checked at most once a day). `hydra version` prints what you have.
+
 **Requires [Claude Code](https://claude.com/claude-code) installed and on your `PATH`** — each head runs `claude`.
 
 ### macOS notes
