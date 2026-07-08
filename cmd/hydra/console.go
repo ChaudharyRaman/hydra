@@ -26,18 +26,17 @@ func cursorOverlay(line string, col int) string {
 		return line
 	}
 	width := lipgloss.Width(line)
-	left := ansi.Cut(line, 0, col)
-	ch := " "
-	if col < width {
-		if c := ansi.Strip(ansi.Cut(line, col, col+1)); c != "" {
-			ch = c
-		}
+	if col >= width {
+		// Cursor sits at or past the end of the rendered line — e.g. just
+		// after a trailing space the emulator trimmed. Pad out with spaces so
+		// the block lands at the true cursor column instead of snapping back.
+		return line + strings.Repeat(" ", col-width) + "\x1b[0m\x1b[7m \x1b[0m"
 	}
-	right := ""
-	if col+1 < width {
-		right = ansi.Cut(line, col+1, width)
+	ch := ansi.Strip(ansi.Cut(line, col, col+1))
+	if ch == "" {
+		ch = " "
 	}
-	return left + "\x1b[0m\x1b[7m" + ch + "\x1b[0m" + right
+	return ansi.Cut(line, 0, col) + "\x1b[0m\x1b[7m" + ch + "\x1b[0m" + ansi.Cut(line, col+1, width)
 }
 
 // The console is hydra's primary view: a sidebar of sessions (PROJECTS &
