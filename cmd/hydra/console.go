@@ -76,7 +76,12 @@ type consoleModel struct {
 	prompting  bool // Ctrl+N new-agent prompt
 	renaming   bool // R rename prompt
 	input      string
-	promptMode int // modeClaude | modeShell | modeCustom
+	promptMode int      // modeClaude | modeShell | modeCustom
+	promptSel  int      // -1 = the typed input line; 0..n-1 = a saved path
+	completes  []string // directory candidates shown after Tab
+
+	savedPaths []string  // pinned project directories
+	quitAt     time.Time // for double-press quit
 
 	scrollOff int  // lines scrolled up into the focused head's history (0 = live)
 	helpOpen  bool // F1 help overlay
@@ -119,6 +124,7 @@ func checkUpdateCmd() tea.Cmd {
 
 func runConsole() {
 	m := &consoleModel{mgr: terminal.NewManager()}
+	m.loadSaved()
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "hydra:", err)
@@ -130,6 +136,65 @@ func runConsole() {
 func (m *consoleModel) setFlash(s string) {
 	m.flash = s
 	m.flashUntil = time.Now().Add(4 * time.Second)
+}
+
+func (m *consoleModel) loadSaved() { m.savedPaths = core.SavedPaths() }
+
+// expandHome resolves a leading ~ to the user's home directory.
+func expandHome(p string) string {
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, strings.TrimPrefix(p, "~"))
+		}
+	}
+	return p
+}
+
+// completeDir does shell-style Tab completion over directories. It returns
+// the completed input and, when ambiguous, the list of candidate names.
+func completeDir(in string) (string, []string) {
+	full := expandHome(in)
+	dir, base := filepath.Dir(full), filepath.Base(full)
+	if strings.HasSuffix(full, "/") || full == "" {
+		dir, base = strings.TrimSuffix(full, "/"), ""
+		if dir == "" {
+			dir = "/"
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return in, nil
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() && strings.HasPrefix(e.Name(), base) && !strings.HasPrefix(e.Name(), ".") {
+			names = append(names, e.Name())
+		}
+	}
+	switch len(names) {
+	case 0:
+		return in, nil
+	case 1:
+		return filepath.Join(dir, names[0]) + "/", nil
+	default:
+		return filepath.Join(dir, commonPrefix(names)), names
+	}
+}
+
+func commonPrefix(ss []string) string {
+	if len(ss) == 0 {
+		return ""
+	}
+	p := ss[0]
+	for _, s := range ss[1:] {
+		for !strings.HasPrefix(s, p) {
+			p = p[:len(p)-1]
+			if p == "" {
+				return ""
+			}
+		}
+	}
+	return p
 }
 
 func (m *consoleModel) Init() tea.Cmd { return tea.Batch(consoleTickCmd(), checkUpdateCmd()) }
@@ -450,24 +515,16 @@ func (m *consoleModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if m.prompting || m.renaming {
+	if m.renaming {
 		switch msg.String() {
 		case "enter":
-			if m.renaming {
-				if it := m.cur(); it != nil && it.head != nil {
-					it.head.Rename(m.input)
-				}
-			} else {
-				m.submitPrompt()
+			if it := m.cur(); it != nil && it.head != nil {
+				it.head.Rename(m.input)
 			}
-			m.prompting, m.renaming, m.input, m.promptMode = false, false, "", modeClaude
+			m.renaming, m.input = false, ""
 			m.refresh()
 		case "esc":
-			m.prompting, m.renaming, m.input, m.promptMode = false, false, "", modeClaude
-		case "tab":
-			if m.prompting {
-				m.promptMode = (m.promptMode + 1) % 3
-			}
+			m.renaming, m.input = false, ""
 		case "ctrl+u":
 			m.input = ""
 		case "backspace":
@@ -481,6 +538,54 @@ func (m *consoleModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.input += " "
 			}
 		}
+		return m, nil
+	}
+
+	if m.prompting {
+		switch msg.String() {
+		case "enter":
+			m.submitPrompt()
+			m.closePrompt()
+			m.refresh()
+		case "esc":
+			m.closePrompt()
+		case "ctrl+t": // cycle Claude / shell / custom
+			m.promptMode, m.completes = (m.promptMode+1)%3, nil
+		case "tab": // path completion (not for custom commands)
+			if m.promptMode != modeCustom {
+				m.input, m.completes = completeDir(m.input)
+				m.promptSel = -1
+			}
+		case "up":
+			m.pickSaved(-1)
+		case "down":
+			m.pickSaved(1)
+		case "ctrl+u":
+			m.input, m.promptSel, m.completes = "", -1, nil
+		case "backspace":
+			if len(m.input) > 0 {
+				m.input = m.input[:len(m.input)-1]
+			}
+			m.promptSel, m.completes = -1, nil
+		default:
+			if msg.Type == tea.KeyRunes {
+				m.input += string(msg.Runes)
+			} else if msg.Type == tea.KeySpace {
+				m.input += " "
+			}
+			m.promptSel, m.completes = -1, nil
+		}
+		return m, nil
+	}
+
+	// Alt+Up/Down jump between heads — works while focused too, so you can
+	// switch live terminals without detaching.
+	switch msg.String() {
+	case "alt+up":
+		m.moveSelection(-1)
+		return m, nil
+	case "alt+down":
+		m.moveSelection(1)
 		return m, nil
 	}
 
@@ -513,8 +618,23 @@ func (m *consoleModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Sidebar navigation mode.
 	switch msg.String() {
-	case "q", "ctrl+c":
+	case "ctrl+c":
 		return m, tea.Quit
+	case "q":
+		if time.Since(m.quitAt) < 2*time.Second {
+			return m, tea.Quit
+		}
+		m.quitAt = time.Now()
+		m.setFlash("press q again to quit")
+	case "s":
+		if it := m.cur(); it != nil && it.dir != "" {
+			if core.ToggleSavedPath(it.dir) {
+				m.setFlash("★ saved " + it.dir)
+			} else {
+				m.setFlash("removed saved path " + it.dir)
+			}
+			m.loadSaved()
+		}
 	case "up", "k":
 		if m.selected > 0 {
 			m.selected--
@@ -548,7 +668,9 @@ func (m *consoleModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.setFlash("this head has ended — Ctrl+X to remove it")
 		}
 	case "ctrl+n":
-		m.prompting, m.promptMode = true, modeClaude
+		m.prompting, m.promptMode, m.promptSel, m.completes = true, modeClaude, -1, nil
+		m.loadSaved()
+		m.input = ""
 		if cwd, err := os.Getwd(); err == nil {
 			m.input = cwd
 		}
@@ -573,6 +695,42 @@ func (m *consoleModel) resetView() {
 	m.scrollOff = 0
 	m.selActive = false
 	m.searchQuery, m.matches = "", nil
+}
+
+func (m *consoleModel) closePrompt() {
+	m.prompting, m.input, m.promptMode, m.promptSel, m.completes = false, "", modeClaude, -1, nil
+}
+
+// pickSaved cycles the highlight through the saved-path list, filling the
+// input with the chosen path (-1 returns to the free-text line).
+func (m *consoleModel) pickSaved(d int) {
+	if len(m.savedPaths) == 0 {
+		return
+	}
+	m.promptSel += d
+	if m.promptSel < -1 {
+		m.promptSel = len(m.savedPaths) - 1
+	}
+	if m.promptSel >= len(m.savedPaths) {
+		m.promptSel = -1
+	}
+	if m.promptSel >= 0 {
+		m.input = m.savedPaths[m.promptSel]
+	}
+	m.completes = nil
+}
+
+// moveSelection jumps between heads, keeping focus if focused.
+func (m *consoleModel) moveSelection(d int) {
+	if len(m.items) == 0 {
+		return
+	}
+	n := clamp(m.selected+d, 0, len(m.items)-1)
+	if n != m.selected {
+		m.selected = n
+		m.resetView()
+		m.resizeFocused()
+	}
 }
 
 func (m *consoleModel) cur() *item {
@@ -606,6 +764,7 @@ func (m *consoleModel) submitPrompt() {
 }
 
 func (m *consoleModel) spawnHead(dir, autorun, name string) {
+	dir = expandHome(dir)
 	if dir == "" {
 		dir, _ = os.Getwd()
 	}
@@ -745,13 +904,21 @@ func (m *consoleModel) viewTitle() string {
 func (m *consoleModel) viewSidebar() string {
 	h := m.bodyHeight()
 	inner := sidebarW - 2
+	saved := map[string]bool{}
+	for _, p := range m.savedPaths {
+		saved[p] = true
+	}
 	rows := []string{sbHeadStyle.Render("PROJECTS & AGENTS")}
 	for i, it := range m.items {
 		label, color := stateBadge(it.state)
 		dot := lipgloss.NewStyle().Foreground(color).Render("●")
-		name := truncate(it.name, 15)
+		name := truncate(it.name, 14)
+		star := " "
+		if saved[it.dir] {
+			star = lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Render("★")
+		}
 		meta := label + " " + humanAge(time.Duration(it.ageSecs)*time.Second)
-		line := fmt.Sprintf("%s %-15s", dot, name)
+		line := fmt.Sprintf("%s %-14s%s", dot, name, star)
 		metaLine := dimText.Render(truncate(meta, inner-2))
 		block := line + "\n   " + metaLine
 		if i == m.selected {
@@ -790,16 +957,7 @@ func (m *consoleModel) viewTerminal() string {
 			dimText.Render("Enter to rename · Esc to cancel"),
 		}
 	case m.prompting:
-		label := "working directory:"
-		if m.promptMode == modeCustom {
-			label = "command to run (e.g. ssh user@host):"
-		}
-		lines = []string{
-			promptStyle.Render("New " + modeName[m.promptMode] + " head — " + label), "",
-			"  " + m.input + "▏", "",
-			"Runs: " + titleStyle.Render(modeName[m.promptMode]),
-			dimText.Render("Enter spawn · Tab cycle Claude/shell/custom · Esc cancel"),
-		}
+		lines = m.promptLines()
 	case m.cur() == nil:
 		lines = []string{dimText.Render("No session selected."), dimText.Render("Ctrl+N to spawn a live head.")}
 	default:
@@ -826,6 +984,39 @@ func (m *consoleModel) viewTerminal() string {
 		}
 	}
 	return boxify(lines, innerW, rows, borderColor)
+}
+
+// promptLines renders the new-head prompt: the path/command input, Tab
+// completion candidates, and the saved-paths quick-pick list.
+func (m *consoleModel) promptLines() []string {
+	label := "working directory:"
+	if m.promptMode == modeCustom {
+		label = "command to run (e.g. ssh user@host):"
+	}
+	cursor := ""
+	if m.promptSel < 0 {
+		cursor = "▏"
+	}
+	out := []string{
+		promptStyle.Render("New "+modeName[m.promptMode]+" head") + dimText.Render("  (Ctrl+T changes type)"),
+		"",
+		"  " + m.input + cursor,
+	}
+	if len(m.completes) > 0 { // Tab candidates, like a shell
+		out = append(out, dimText.Render("  ↳ "+strings.Join(m.completes, "  ")))
+	}
+	if m.promptMode != modeCustom && len(m.savedPaths) > 0 {
+		out = append(out, "", dimText.Render("Saved paths ")+dimText.Render("(↑/↓ to pick):"))
+		for i, p := range m.savedPaths {
+			row := "  ★ " + p
+			if i == m.promptSel {
+				row = selStyle.Render(" ★ " + p + " ")
+			}
+			out = append(out, row)
+		}
+	}
+	out = append(out, "", dimText.Render(label+"  Tab complete · Enter spawn · Esc cancel"))
+	return out
 }
 
 // boxify frames content in a rounded box of exactly innerW×rows, keeping
@@ -869,9 +1060,9 @@ func (m *consoleModel) viewFooter() string {
 	case m.helpOpen:
 		keys = "F1/Esc Close help"
 	case m.focusTerm:
-		keys = "Ctrl+Q Detach · wheel/Shift+PgUp Scroll · F1 Help · (keys → terminal)"
+		keys = "Ctrl+Q Detach · Alt+↑/↓ Switch head · wheel Scroll · F1 Help · (keys → terminal)"
 	default:
-		keys = "↑/↓ Select · Enter Focus · / Search · drag=copy · Ctrl+N New · F1 Help · q Quit"
+		keys = "↑/↓ Select · Alt+↑/↓ Jump · Enter Focus · s Save · Ctrl+N New · / Search · F1 · qq Quit"
 	}
 	gap := m.width - lipgloss.Width(info) - lipgloss.Width(keys) - 2
 	if gap < 1 {
@@ -887,17 +1078,17 @@ func helpLines() []string {
 	return []string{
 		title("HYDRA — keybindings"), "",
 		dim("Sidebar (detached)"),
-		"  ↑/↓ or j/k     select a head",
+		"  ↑/↓ or j/k     select a head    Alt+↑/↓  jump between heads",
 		"  Enter          focus its terminal (type into it)",
-		"  Ctrl+N         new head (Tab in prompt: Claude / shell / custom)",
-		"  R              rename the selected head",
-		"  Ctrl+X         close the selected head",
-		"  PgUp/PgDn      scroll · drag mouse to select+copy",
+		"  s              save / unsave this head's path (★)",
+		"  Ctrl+N         new head — Tab completes paths, ↑/↓ picks saved,",
+		"                 Ctrl+T switches Claude / shell / custom",
+		"  R  rename · Ctrl+X close · PgUp/PgDn scroll · drag to copy",
 		"  /              search history · n older · N newer · Esc clear",
-		"  q / Ctrl+C     quit hydra",
+		"  q q            quit hydra (press twice) · Ctrl+C quits now",
 		"",
 		dim("Focused terminal"),
-		"  Ctrl+Q         detach back to the sidebar",
+		"  Ctrl+Q  detach     Alt+↑/↓  switch head without detaching",
 		"  Wheel / Shift+PgUp/PgDn   scroll history",
 		"  Ctrl+←/→ word move · Ctrl+Backspace word delete · Ctrl+R shell search",
 		"  all other keys go straight to Claude / the shell",
