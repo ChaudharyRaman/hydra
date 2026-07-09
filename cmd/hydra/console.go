@@ -268,10 +268,10 @@ func (m *consoleModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *consoleModel) onMouse(msg tea.MouseMsg) {
 	switch msg.Button {
 	case tea.MouseButtonWheelUp:
-		m.scrollBy(3)
+		m.wheel(msg, true)
 		return
 	case tea.MouseButtonWheelDown:
-		m.scrollBy(-3)
+		m.wheel(msg, false)
 		return
 	case tea.MouseButtonLeft:
 	default:
@@ -510,6 +510,23 @@ func (m *consoleModel) anchorScroll() {
 	m.lastSbLen = sb
 }
 
+// wheel handles one scroll-wheel tick. A full-screen app on the alt screen
+// (e.g. Claude) has no terminal scrollback, so hydra forwards the wheel and
+// lets the app scroll its own view; otherwise it moves hydra's scrollback view.
+func (m *consoleModel) wheel(msg tea.MouseMsg, up bool) {
+	if it := m.cur(); it != nil && it.head != nil && it.head.IsAltScreen() {
+		col := clamp(msg.X-(sidebarW+1), 0, m.termCols()-1)
+		row := clamp(msg.Y-3, 0, m.termRows()-1)
+		it.head.SendWheel(up, col, row)
+		return
+	}
+	if up {
+		m.scrollBy(3)
+	} else {
+		m.scrollBy(-3)
+	}
+}
+
 // scrollBy moves the focused head's view into or out of its scrollback.
 func (m *consoleModel) scrollBy(n int) {
 	it := m.cur()
@@ -647,18 +664,23 @@ func (m *consoleModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.focusTerm = false
 			m.setFlash("detached — arrows to select, Enter to re-focus")
 			return m, nil
-		case "shift+pgup":
-			m.scrollBy(m.termRows() / 2)
-			return m, nil
-		case "shift+pgdown":
-			m.scrollBy(-m.termRows() / 2)
-			return m, nil
-		case "shift+up": // line scroll — works on Mac laptops with no PgUp key
-			m.scrollBy(3)
-			return m, nil
-		case "shift+down":
-			m.scrollBy(-3)
-			return m, nil
+		case "shift+pgup", "shift+pgdown", "shift+up", "shift+down":
+			// Move hydra's own scrollback for inline apps/shells. On the alt
+			// screen there is no such history, so fall through and let the
+			// full-screen app (e.g. Claude) handle the scroll key itself.
+			if it := m.cur(); it == nil || it.head == nil || !it.head.IsAltScreen() {
+				switch msg.String() {
+				case "shift+pgup":
+					m.scrollBy(m.termRows() / 2)
+				case "shift+pgdown":
+					m.scrollBy(-m.termRows() / 2)
+				case "shift+up":
+					m.scrollBy(3)
+				case "shift+down":
+					m.scrollBy(-3)
+				}
+				return m, nil
+			}
 		}
 		if it := m.cur(); it != nil && it.head != nil {
 			m.scrollOff = 0 // any input jumps back to the live view

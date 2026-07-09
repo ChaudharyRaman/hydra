@@ -247,6 +247,18 @@ func (s *Session) ScrollbackLen() int { return s.em.ScrollbackLen() }
 // full-screen TUI), where there is no scrollback to move into.
 func (s *Session) IsAltScreen() bool { return s.em.IsAltScreen() }
 
+// SendWheel forwards a mouse-wheel scroll to the child, encoded in whatever
+// mouse mode the child requested (a no-op if it requested none). Full-screen
+// apps like Claude scroll their own transcript on the alt screen, where hydra
+// has no scrollback of its own to move. x,y are 0-based cells in the child.
+func (s *Session) SendWheel(up bool, x, y int) {
+	btn := vt.MouseWheelDown
+	if up {
+		btn = vt.MouseWheelUp
+	}
+	s.em.SendMouse(vt.MouseWheel{X: x, Y: y, Button: btn})
+}
+
 // ViewLines returns `rows` display lines for a view scrolled `offset` lines
 // up from the live bottom. offset 0 == the current screen. Scrollback lines
 // are rendered above the live screen, forming one continuous history.

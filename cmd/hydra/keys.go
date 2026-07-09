@@ -25,6 +25,14 @@ func keyToBytes(msg tea.KeyMsg) []byte {
 		return []byte{0x17}
 	case "alt+backspace": // readline backward-kill-word
 		return []byte{0x1b, 0x7f}
+	case "shift+up": // scroll keys forwarded to full-screen apps (alt screen)
+		return []byte("\x1b[1;2A")
+	case "shift+down":
+		return []byte("\x1b[1;2B")
+	case "shift+pgup":
+		return []byte("\x1b[5;2~")
+	case "shift+pgdown":
+		return []byte("\x1b[6;2~")
 	}
 	switch msg.Type {
 	case tea.KeyRunes:
