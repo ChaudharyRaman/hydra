@@ -693,7 +693,7 @@ func (m *consoleModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.setFlash("this head has ended — Ctrl+X to remove it")
 		}
 	case "ctrl+n":
-		m.prompting, m.promptMode, m.promptSel, m.completes = true, modeClaude, -1, nil
+		m.prompting, m.promptMode, m.promptSel, m.completes = true, modeShell, -1, nil
 		m.loadSaved()
 		m.input = ""
 		if cwd, err := os.Getwd(); err == nil {
@@ -730,7 +730,7 @@ func (m *consoleModel) resetView() {
 }
 
 func (m *consoleModel) closePrompt() {
-	m.prompting, m.input, m.promptMode, m.promptSel, m.completes = false, "", modeClaude, -1, nil
+	m.prompting, m.input, m.promptMode, m.promptSel, m.completes = false, "", modeShell, -1, nil
 }
 
 // pickSaved cycles the highlight through the saved-path list, filling the
