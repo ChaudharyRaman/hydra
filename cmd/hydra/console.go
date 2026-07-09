@@ -628,6 +628,12 @@ func (m *consoleModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "shift+pgdown":
 			m.scrollBy(-m.termRows() / 2)
 			return m, nil
+		case "shift+up": // line scroll — works on Mac laptops with no PgUp key
+			m.scrollBy(3)
+			return m, nil
+		case "shift+down":
+			m.scrollBy(-3)
+			return m, nil
 		}
 		if it := m.cur(); it != nil && it.head != nil {
 			m.scrollOff = 0 // any input jumps back to the live view
@@ -674,6 +680,10 @@ func (m *consoleModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.scrollBy(m.termRows() / 2)
 	case "pgdown":
 		m.scrollBy(-m.termRows() / 2)
+	case "shift+up": // line scroll — works on Mac laptops with no PgUp key
+		m.scrollBy(3)
+	case "shift+down":
+		m.scrollBy(-3)
 	case "/":
 		if it := m.cur(); it != nil && it.head != nil {
 			m.searching, m.searchQuery = true, ""
@@ -1115,13 +1125,13 @@ func helpLines() []string {
 		"  s              save / unsave this head's path (★)",
 		"  Ctrl+N         new head — Tab completes paths, ↑/↓ picks saved,",
 		"                 Ctrl+T switches Claude / shell / custom",
-		"  R  rename · Ctrl+X close · PgUp/PgDn scroll · drag to copy",
+		"  R  rename · Ctrl+X close · PgUp/PgDn or Shift+↑/↓ scroll · drag to copy",
 		"  /              search history · n older · N newer · Esc clear",
 		"  q q            quit hydra (press twice) · Ctrl+C quits now",
 		"",
 		dim("Focused terminal"),
 		"  Ctrl+Q  detach     Alt+↑/↓  switch head without detaching",
-		"  Wheel / Shift+PgUp/PgDn   scroll history",
+		"  Wheel / Shift+↑↓ / Shift+PgUp/PgDn   scroll history",
 		"  Ctrl+←/→ word move · Ctrl+Backspace word delete · Ctrl+R shell search",
 		"  all other keys go straight to Claude / the shell",
 		"",
