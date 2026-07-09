@@ -84,6 +84,7 @@ type consoleModel struct {
 	quitAt     time.Time // for double-press quit
 
 	scrollOff int  // lines scrolled up into the focused head's history (0 = live)
+	lastSbLen int  // focused head's scrollback length at the last tick (drift anchor)
 	helpOpen  bool // F1 help overlay
 
 	// Mouse text selection over the terminal pane (content-row/col coords).
@@ -224,6 +225,7 @@ func (m *consoleModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.ticks%6 == 0 { // ~every half-second: refresh sidebar states
 			m.refresh()
 		}
+		m.anchorScroll()
 		m.resizeFocused()
 		return m, consoleTickCmd()
 	case updateAvailableMsg:
@@ -389,6 +391,7 @@ func (m *consoleModel) jumpToMatch() {
 	line := m.matches[m.matchIdx]
 	off := m.searchTotal - line - m.termRows()/2
 	m.scrollOff = clamp(off, 0, it.head.ScrollbackLen())
+	m.lastSbLen = it.head.ScrollbackLen() // re-baseline drift anchor to this jump
 }
 
 // decorate applies search highlight, selection highlight, and the cursor to
@@ -458,6 +461,28 @@ func highlightAll(line, query string) string {
 		line = highlightRange(line, ranges[k][0], ranges[k][1])
 	}
 	return line
+}
+
+// anchorScroll keeps a scrolled-up view pinned to the same history lines as
+// new output streams in. scrollOff counts lines up from the live bottom, so a
+// busy head (e.g. a Claude session redrawing and appending) would otherwise
+// slide the view toward the bottom on every new line — making it feel like you
+// can't scroll back at all. Growing scrollOff by however many lines were pushed
+// into scrollback holds the view still. Called every tick.
+func (m *consoleModel) anchorScroll() {
+	it := m.cur()
+	if it == nil || it.head == nil {
+		m.lastSbLen = 0
+		return
+	}
+	sb := it.head.ScrollbackLen()
+	if m.scrollOff > 0 && sb > m.lastSbLen {
+		m.scrollOff += sb - m.lastSbLen
+		if m.scrollOff > sb {
+			m.scrollOff = sb
+		}
+	}
+	m.lastSbLen = sb
 }
 
 // scrollBy moves the focused head's view into or out of its scrollback.
@@ -695,6 +720,13 @@ func (m *consoleModel) resetView() {
 	m.scrollOff = 0
 	m.selActive = false
 	m.searchQuery, m.matches = "", nil
+	// Re-baseline the drift anchor to the newly selected head so a scroll
+	// before the next tick can't be measured against the old head's history.
+	if it := m.cur(); it != nil && it.head != nil {
+		m.lastSbLen = it.head.ScrollbackLen()
+	} else {
+		m.lastSbLen = 0
+	}
 }
 
 func (m *consoleModel) closePrompt() {
