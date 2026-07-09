@@ -123,6 +123,12 @@ func checkUpdateCmd() tea.Cmd {
 	}
 }
 
+// debugInput, when set via HYDRA_DEBUG_INPUT=1, flashes every key/mouse event
+// hydra receives into the header — a self-contained way to see what the host
+// terminal actually sends (e.g. whether Shift+Arrow arrives with its modifier
+// or a scroll wheel arrives at all).
+var debugInput = os.Getenv("HYDRA_DEBUG_INPUT") != ""
+
 func runConsole() {
 	m := &consoleModel{mgr: terminal.NewManager()}
 	m.loadSaved()
@@ -231,8 +237,14 @@ func (m *consoleModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case updateAvailableMsg:
 		m.newVersion = string(msg)
 	case tea.MouseMsg:
+		if debugInput {
+			m.setFlash(fmt.Sprintf("MOUSE: %q", msg.String()))
+		}
 		m.onMouse(msg)
 	case tea.KeyMsg:
+		if debugInput {
+			m.setFlash(fmt.Sprintf("KEY: %q", msg.String()))
+		}
 		return m.onKey(msg)
 	}
 	return m, nil
