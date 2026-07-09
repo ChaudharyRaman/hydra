@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -20,6 +21,22 @@ import (
 	"github.com/charmbracelet/x/vt"
 	"github.com/creack/pty"
 )
+
+// osc8Re matches an OSC 8 hyperlink sequence: ESC ]8; <params> ; <uri> BEL.
+// The vt emulator parses the params/uri fields swapped and re-emits them the
+// same way, so a link like "https://x" comes out with the URI set to the
+// params (e.g. "id=abc"). Clicking it in the outer terminal then tries to open
+// the params string. renderScreen swaps the two fields back.
+var osc8Re = regexp.MustCompile("\x1b\\]8;([^;\x1b\x07]*);([^\x1b\x07]*)\x07")
+
+// fixHyperlinks restores correct OSC 8 field order (params;uri) in emulator
+// output. No-op when the frame has no hyperlinks.
+func fixHyperlinks(s string) string {
+	if !strings.Contains(s, "\x1b]8;") {
+		return s
+	}
+	return osc8Re.ReplaceAllString(s, "\x1b]8;${2};${1}\x07")
+}
 
 // renderInterval is how often a head refreshes its cached screen snapshot.
 const renderInterval = 33 * time.Millisecond
@@ -182,8 +199,11 @@ func (s *Session) renderLoop() {
 	}
 }
 
+// renderScreen renders the live screen with hyperlink fields corrected.
+func (s *Session) renderScreen() string { return fixHyperlinks(s.em.Render()) }
+
 func (s *Session) updateCache() {
-	r := s.em.Render()
+	r := s.renderScreen()
 	p := s.em.CursorPosition()
 	s.cacheMu.Lock()
 	s.cache, s.curX, s.curY = r, p.X, p.Y
@@ -228,7 +248,7 @@ func (s *Session) ScrollbackLen() int { return s.em.ScrollbackLen() }
 // are rendered above the live screen, forming one continuous history.
 func (s *Session) ViewLines(offset, rows int) []string {
 	sbLen := s.em.ScrollbackLen()
-	screen := strings.Split(s.em.Render(), "\n")
+	screen := strings.Split(s.renderScreen(), "\n")
 	total := sbLen + len(screen)
 	if offset < 0 {
 		offset = 0
