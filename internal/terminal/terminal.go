@@ -243,6 +243,10 @@ func (s *Session) CursorPos() (int, int) {
 // are available to scroll back into view.
 func (s *Session) ScrollbackLen() int { return s.em.ScrollbackLen() }
 
+// IsAltScreen reports whether the child is on the alternate screen (a
+// full-screen TUI), where there is no scrollback to move into.
+func (s *Session) IsAltScreen() bool { return s.em.IsAltScreen() }
+
 // ViewLines returns `rows` display lines for a view scrolled `offset` lines
 // up from the live bottom. offset 0 == the current screen. Scrollback lines
 // are rendered above the live screen, forming one continuous history.

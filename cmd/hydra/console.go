@@ -129,6 +129,18 @@ func checkUpdateCmd() tea.Cmd {
 // or a scroll wheel arrives at all).
 var debugInput = os.Getenv("HYDRA_DEBUG_INPUT") != ""
 
+// debugFlash shows an input event plus the resulting scroll state, so we can
+// see whether an event reached scrollBy (off changes) and whether there is any
+// scrollback to move into (sb > 0).
+func (m *consoleModel) debugFlash(ev string) {
+	sb, alt := 0, false
+	if it := m.cur(); it != nil && it.head != nil {
+		sb = it.head.ScrollbackLen()
+		alt = it.head.IsAltScreen()
+	}
+	m.setFlash(fmt.Sprintf("%s | off=%d sb=%d alt=%v rows=%d", ev, m.scrollOff, sb, alt, m.termRows()))
+}
+
 func runConsole() {
 	m := &consoleModel{mgr: terminal.NewManager()}
 	m.loadSaved()
@@ -237,15 +249,16 @@ func (m *consoleModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case updateAvailableMsg:
 		m.newVersion = string(msg)
 	case tea.MouseMsg:
-		if debugInput {
-			m.setFlash(fmt.Sprintf("MOUSE: %q", msg.String()))
-		}
 		m.onMouse(msg)
-	case tea.KeyMsg:
 		if debugInput {
-			m.setFlash(fmt.Sprintf("KEY: %q", msg.String()))
+			m.debugFlash("M:" + msg.String())
 		}
-		return m.onKey(msg)
+	case tea.KeyMsg:
+		md, cmd := m.onKey(msg)
+		if debugInput {
+			m.debugFlash("K:" + msg.String())
+		}
+		return md, cmd
 	}
 	return m, nil
 }
